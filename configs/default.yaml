@@ -1,0 +1,33 @@
+num_agents: 2
+train_rounds: 5
+eval_rounds: 5
+
+train_dataset: gsm8k
+test_dataset: gsm8k
+train_limit: null
+eval_limit: null
+
+agent_model: qwen2.5-7b
+policy_backend: mock
+rl_algorithm: gspo
+custom_updater: null
+
+controller_update: regret_matching
+middle_value_mode: pending_answer_signed
+custom_value_function: null
+custom_reward_function: null
+agent_schedule: round_robin
+
+seed: 42
+output_dir: runs/default
+
+generation:
+  max_new_tokens: 256
+  temperature: 0.3
+  num_candidates: 4
+  num_greedy_candidates: 0
+
+evaluation:
+  controller_modes:
+    - stochastic
+    - greedy

@@ -41,10 +41,14 @@ class ExperimentConfig:
     policy_backend: str = "mock"
     rl_algorithm: str = "gspo"
     custom_updater: str | None = None
+    agent_rl_algorithms: dict[str, str] = field(default_factory=dict)
+    agent_updaters: dict[str, str] = field(default_factory=dict)
     controller_update: str = "regret_matching"
     middle_value_mode: str = "pending_answer_signed"
     custom_value_function: str | None = None
     custom_reward_function: str | None = None
+    custom_prompt_function: str | None = None
+    custom_answer_extractor: str | None = None
     agent_schedule: str = "round_robin"
     seed: int = 42
     output_dir: str = "runs/default"
@@ -56,6 +60,10 @@ def _coerce_scalar(value: str) -> Any:
     text = value.strip()
     if text in {"null", "None", ""}:
         return None
+    if text == "{}":
+        return {}
+    if text == "[]":
+        return []
     if text in {"true", "True"}:
         return True
     if text in {"false", "False"}:
@@ -159,10 +167,14 @@ def config_to_dict(config: ExperimentConfig) -> dict[str, Any]:
         "policy_backend": config.policy_backend,
         "rl_algorithm": config.rl_algorithm,
         "custom_updater": config.custom_updater,
+        "agent_rl_algorithms": dict(config.agent_rl_algorithms),
+        "agent_updaters": dict(config.agent_updaters),
         "controller_update": config.controller_update,
         "middle_value_mode": config.middle_value_mode,
         "custom_value_function": config.custom_value_function,
         "custom_reward_function": config.custom_reward_function,
+        "custom_prompt_function": config.custom_prompt_function,
+        "custom_answer_extractor": config.custom_answer_extractor,
         "agent_schedule": config.agent_schedule,
         "seed": config.seed,
         "output_dir": config.output_dir,

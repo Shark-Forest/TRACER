@@ -11,11 +11,15 @@ agent_model: qwen2.5-7b
 policy_backend: mock
 rl_algorithm: gspo
 custom_updater: null
+agent_rl_algorithms: {}
+agent_updaters: {}
 
 controller_update: regret_matching
 middle_value_mode: pending_answer_signed
 custom_value_function: null
 custom_reward_function: null
+custom_prompt_function: null
+custom_answer_extractor: null
 agent_schedule: round_robin
 
 seed: 42

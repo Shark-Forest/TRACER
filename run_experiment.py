@@ -28,6 +28,8 @@ def _non_null_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "middle_value_mode": args.middle_value_mode,
         "custom_value_function": args.custom_value_function,
         "custom_reward_function": args.custom_reward_function,
+        "custom_prompt_function": args.custom_prompt_function,
+        "custom_answer_extractor": args.custom_answer_extractor,
         "output_dir": args.output_dir,
         "seed": args.seed,
     }
@@ -52,10 +54,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-limit", type=int)
     parser.add_argument("--agent-model")
     parser.add_argument("--policy-backend", choices=["mock", "transformers"])
-    parser.add_argument("--rl-algorithm", choices=["gspo", "custom", "none", "noop"])
+    parser.add_argument("--rl-algorithm")
     parser.add_argument("--custom-updater")
     parser.add_argument("--custom-value-function")
     parser.add_argument("--custom-reward-function")
+    parser.add_argument("--custom-prompt-function")
+    parser.add_argument("--custom-answer-extractor")
     parser.add_argument("--controller-update", choices=["regret_matching"])
     parser.add_argument("--middle-value-mode", choices=["pending_answer_signed"])
     parser.add_argument("--output-dir")

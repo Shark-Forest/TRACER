@@ -11,8 +11,8 @@ from .controllers import (
     PROPOSAL_REFRESH,
     REVIEWER_SPEAK,
 )
-from .customization import Customization
-from .data_loader import Sample, extract_final_answer
+from .customization import Customization, load_callable
+from .data_loader import Sample, extract_answer as default_extract_answer
 from .policies import PolicyUpdater, TextPolicy, build_policy, build_updater
 from .values import answers_match, pending_answer_skip_value, signed_answer_value
 
@@ -23,6 +23,7 @@ class DialogueState:
 
     question: str
     ground_truth: object
+    dataset_name: str = "gsm8k"
     history: list[dict[str, object]] = field(default_factory=list)
     pending_text: str | None = None
     pending_answer: object | None = None
@@ -30,7 +31,7 @@ class DialogueState:
     final_answer: object | None = None
 
     def context(self) -> str:
-        parts = [f"QUESTION:\n{self.question}"]
+        parts = [f"DATASET: {self.dataset_name}", f"QUESTION:\n{self.question}"]
         if self.pending_text:
             parts.append(f"CURRENT PENDING SOLUTION:\n{self.pending_text}")
         if self.history:
@@ -70,11 +71,21 @@ class Runtime:
     controllers: ControllerBank
     updater: PolicyUpdater
     customization: Customization
+    answer_extractor: Callable[..., object | None] | None = None
+    updaters: list[PolicyUpdater] = field(default_factory=list)
 
     @classmethod
     def build(cls, config: ExperimentConfig) -> "Runtime":
         agents = []
-        for _ in range(config.num_agents):
+        updaters = []
+        for agent_index in range(config.num_agents):
+            agent_key = str(agent_index)
+            has_agent_algorithm = agent_key in config.agent_rl_algorithms
+            algorithm = config.agent_rl_algorithms.get(agent_key, config.rl_algorithm)
+            updater_path = config.agent_updaters.get(agent_key)
+            if updater_path is None and not has_agent_algorithm:
+                updater_path = config.custom_updater
+            updaters.append(build_updater(algorithm, updater_path))
             agents.append(
                 AgentBundle(
                     proposer=build_policy(
@@ -83,6 +94,8 @@ class Runtime:
                         config.agent_model,
                         config.generation.max_new_tokens,
                         config.generation.temperature,
+                        config.custom_prompt_function,
+                        agent_index,
                     ),
                     reviewer=build_policy(
                         "reviewer",
@@ -90,6 +103,8 @@ class Runtime:
                         config.agent_model,
                         config.generation.max_new_tokens,
                         config.generation.temperature,
+                        config.custom_prompt_function,
+                        agent_index,
                     ),
                 )
             )
@@ -97,17 +112,39 @@ class Runtime:
             config=config,
             agents=agents,
             controllers=ControllerBank(config.num_agents),
-            updater=build_updater(config.rl_algorithm, config.custom_updater),
+            updater=updaters[0],
             customization=Customization(
                 value_function=config.custom_value_function,
                 reward_function=config.custom_reward_function,
             ),
+            answer_extractor=load_callable(config.custom_answer_extractor),
+            updaters=updaters,
         )
 
     def active_agent_index(self, round_index: int) -> int:
         if self.config.agent_schedule != "round_robin":
             raise ValueError(f"Unsupported agent_schedule: {self.config.agent_schedule}")
         return (round_index - 1) % len(self.agents)
+
+    def updater_for_agent(self, agent_index: int) -> PolicyUpdater:
+        return self.updaters[int(agent_index)] if self.updaters else self.updater
+
+    def extract_answer(
+        self,
+        text: str | None,
+        dataset_name: str | None,
+        agent_index: int | None = None,
+    ) -> object | None:
+        if self.answer_extractor is not None:
+            try:
+                return self.answer_extractor(
+                    text=text,
+                    dataset_name=dataset_name,
+                    agent_index=agent_index,
+                )
+            except TypeError:
+                return self.answer_extractor(text=text, dataset_name=dataset_name)
+        return default_extract_answer(text, dataset_name)
 
 
 def is_proposal_round(round_index: int) -> bool:
@@ -116,7 +153,7 @@ def is_proposal_round(round_index: int) -> bool:
 
 def controller_state(state: DialogueState, round_index: int, total_rounds: int) -> tuple[str, str, str]:
     if state.pending_answer is None:
-        score_bucket = "no_pending"
+        score_bucket = "no_pending" if state.pending_text is None else "invalid_pending"
     elif state.pending_vote_score > 0:
         score_bucket = f"vote_plus_{state.pending_vote_score}"
     elif state.pending_vote_score < 0:
@@ -147,7 +184,12 @@ def default_reviewer_reward(review_text: str, pending_answer: object, ground_tru
     return 1.0 if verdict == target else -1.0
 
 
-def reviewer_reward(runtime: Runtime, review_text: str, state: DialogueState) -> float:
+def reviewer_reward(
+    runtime: Runtime,
+    review_text: str,
+    state: DialogueState,
+    agent_index: int | None = None,
+) -> float:
     default = default_reviewer_reward(review_text, state.pending_answer, state.ground_truth)
     return runtime.customization.reward(
         "reviewer",
@@ -155,12 +197,19 @@ def reviewer_reward(runtime: Runtime, review_text: str, state: DialogueState) ->
         default=default,
         pending_answer=state.pending_answer,
         ground_truth=state.ground_truth,
+        dataset_name=state.dataset_name,
+        agent_index=agent_index,
         state=state,
     )
 
 
-def proposer_reward(runtime: Runtime, proposal_text: str, state: DialogueState) -> float:
-    answer = extract_final_answer(proposal_text)
+def proposer_reward(
+    runtime: Runtime,
+    proposal_text: str,
+    state: DialogueState,
+    agent_index: int | None = None,
+) -> float:
+    answer = runtime.extract_answer(proposal_text, state.dataset_name, agent_index=agent_index)
     default = signed_answer_value(answer, state.ground_truth)
     return runtime.customization.reward(
         "proposer",
@@ -168,17 +217,28 @@ def proposer_reward(runtime: Runtime, proposal_text: str, state: DialogueState) 
         default=default,
         parsed_answer=answer,
         ground_truth=state.ground_truth,
+        dataset_name=state.dataset_name,
+        agent_index=agent_index,
         state=state,
     )
 
 
-def action_value(runtime: Runtime, action: str, default: float, state: DialogueState, **extra) -> float:
+def action_value(
+    runtime: Runtime,
+    action: str,
+    default: float,
+    state: DialogueState,
+    agent_index: int | None = None,
+    **extra,
+) -> float:
     return runtime.customization.value(
         action,
         default=default,
         pending_answer=state.pending_answer,
         ground_truth=state.ground_truth,
         pending_vote_score=state.pending_vote_score,
+        dataset_name=state.dataset_name,
+        agent_index=agent_index,
         state=state,
         **extra,
     )
@@ -197,10 +257,12 @@ def update_policy_from_candidates(
     policy: TextPolicy,
     context: str,
     reward_fn: Callable[[str], float],
+    dataset_name: str,
+    agent_index: int,
 ) -> None:
-    candidates = policy.sample_candidates(context, runtime.config.generation.num_candidates)
+    candidates = policy.sample_candidates(context, runtime.config.generation.num_candidates, dataset_name=dataset_name)
     rewards = [float(reward_fn(candidate)) for candidate in candidates]
-    runtime.updater.update(policy, context, candidates, rewards)
+    runtime.updater_for_agent(agent_index).update(policy, context, candidates, rewards)
 
 
 def execute_proposal_round(
@@ -230,10 +292,12 @@ def execute_proposal_round(
                 runtime,
                 agent.proposer,
                 context,
-                lambda text: proposer_reward(runtime, text, state),
+                lambda text: proposer_reward(runtime, text, state, agent_index=agent_index),
+                state.dataset_name,
+                agent_index,
             )
-        text = agent.proposer.generate(context)
-        answer = extract_final_answer(text)
+        text = agent.proposer.generate(context, dataset_name=state.dataset_name)
+        answer = runtime.extract_answer(text, state.dataset_name, agent_index=agent_index)
         state.pending_text = text
         state.pending_answer = answer
         state.final_answer = answer
@@ -244,8 +308,8 @@ def execute_proposal_round(
 
     keep_default = signed_answer_value(old_pending if old_pending is not None else state.pending_answer, state.ground_truth)
     refresh_default = signed_answer_value(state.pending_answer, state.ground_truth)
-    keep_value = action_value(runtime, "proposal_keep", keep_default, state, previous_pending_answer=old_pending)
-    refresh_value = action_value(runtime, "proposal_refresh", refresh_default, state, previous_pending_answer=old_pending)
+    keep_value = action_value(runtime, "proposal_keep", keep_default, state, agent_index=agent_index, previous_pending_answer=old_pending)
+    refresh_value = action_value(runtime, "proposal_refresh", refresh_default, state, agent_index=agent_index, previous_pending_answer=old_pending)
     if update_controller and old_pending is not None:
         controller.update_proposal(c_state, keep_value=keep_value, refresh_value=refresh_value)
 
@@ -257,9 +321,9 @@ def execute_proposal_round(
     }
 
 
-def estimate_speak_value(runtime: Runtime, agent: AgentBundle, state: DialogueState) -> float:
-    review_text = agent.reviewer.generate(state.context())
-    return reviewer_reward(runtime, review_text, state)
+def estimate_speak_value(runtime: Runtime, agent: AgentBundle, state: DialogueState, agent_index: int) -> float:
+    review_text = agent.reviewer.generate(state.context(), dataset_name=state.dataset_name)
+    return reviewer_reward(runtime, review_text, state, agent_index=agent_index)
 
 
 def execute_review_round(
@@ -277,7 +341,7 @@ def execute_review_round(
     controller = runtime.controllers.for_agent(agent_index)
     c_state = controller_state(state, round_index, total_rounds)
 
-    if state.pending_answer is None:
+    if state.pending_answer is None and state.pending_text is None:
         return {
             "agent": agent_index,
             "stage": "review",
@@ -293,18 +357,20 @@ def execute_review_round(
                 runtime,
                 agent.reviewer,
                 context,
-                lambda text: reviewer_reward(runtime, text, state),
+                lambda text: reviewer_reward(runtime, text, state, agent_index=agent_index),
+                state.dataset_name,
+                agent_index,
             )
-        review_text = agent.reviewer.generate(context)
-        speak_default = reviewer_reward(runtime, review_text, state)
+        review_text = agent.reviewer.generate(context, dataset_name=state.dataset_name)
+        speak_default = reviewer_reward(runtime, review_text, state, agent_index=agent_index)
         apply_review(state, review_text)
         state.append(round_index, agent_index, "review", review_text)
     else:
-        speak_default = estimate_speak_value(runtime, agent, state) if update_controller else 0.0
+        speak_default = estimate_speak_value(runtime, agent, state, agent_index) if update_controller else 0.0
 
     skip_default = pending_answer_skip_value(state.pending_answer, state.ground_truth)
-    skip_value = action_value(runtime, "reviewer_skip", skip_default, state)
-    speak_value = action_value(runtime, "reviewer_speak", speak_default, state)
+    skip_value = action_value(runtime, "reviewer_skip", skip_default, state, agent_index=agent_index)
+    speak_value = action_value(runtime, "reviewer_speak", speak_default, state, agent_index=agent_index)
 
     if update_controller:
         controller.reviewer.update(
@@ -332,7 +398,7 @@ def run_dialogue(
     use_average: bool = False,
     greedy: bool = False,
 ) -> dict[str, object]:
-    state = DialogueState(question=sample.question, ground_truth=sample.answer)
+    state = DialogueState(question=sample.question, ground_truth=sample.answer, dataset_name=sample.dataset_name)
     rounds = []
     for round_index in range(1, int(num_rounds) + 1):
         if is_proposal_round(round_index):

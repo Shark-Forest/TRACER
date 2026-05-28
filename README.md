@@ -119,7 +119,7 @@ Important options:
 | `eval_rounds` | `5` | Number of evaluation dialogue rounds. |
 | `train_dataset` | `gsm8k` | Training dataset name, HF/ModelScope spec, or JSONL path. |
 | `test_dataset` | `gsm8k` | Test dataset name, HF/ModelScope spec, or JSONL path. |
-| `agent_model` | `qwen2.5-7b` | Model key or Hugging Face model path. |
+| `agent_model` | `qwen2.5-7b` | Model key, ModelScope/Hugging Face model id, or local model path. |
 | `policy_backend` | `transformers` | `transformers` for real generation, `mock` for smoke tests. |
 | `rl_algorithm` | `gspo` | Inner-agent updater label. Built-ins: `gspo`, `none`; any custom label is allowed with `custom_updater`. |
 | `custom_updater` | `null` | Import path for a custom inner policy updater. |
@@ -142,6 +142,34 @@ python run_experiment.py \
   --agent-model Qwen/Qwen2.5-7B-Instruct \
   --policy-backend transformers
 ```
+
+## Model Loading
+
+For `policy_backend: transformers`, TRACER loads models in this order:
+
+1. Existing local path, when `agent_model` points to a directory on disk.
+2. ModelScope snapshot via `modelscope.snapshot_download(...)`.
+3. Hugging Face `from_pretrained(...)` fallback with the original model id.
+
+The built-in alias `qwen2.5-7b` resolves to `Qwen/Qwen2.5-7B-Instruct`, then
+follows the same ModelScope-first path. Install `modelscope` for live ModelScope
+downloads:
+
+```bash
+pip install modelscope
+```
+
+Model cache selection uses the first configured value from this list:
+
+```bash
+export TRACER_MODELSCOPE_MODEL_CACHE_DIR=/path/to/model-cache
+export TRACER_MODELSCOPE_CACHE_DIR=/path/to/shared-modelscope-cache
+export MODELSCOPE_CACHE=/path/to/modelscope-cache
+```
+
+If ModelScope is not installed, the download fails, or the downloaded snapshot
+cannot be loaded by Transformers, TRACER falls back to Hugging Face with the
+original `agent_model` id.
 
 ## Dataset Format
 

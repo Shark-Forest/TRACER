@@ -7,5 +7,6 @@ pytest>=8.0
 # require these packages.
 torch>=2.1
 transformers>=4.40
+modelscope>=1.14
 datasets>=2.18
 peft>=0.10

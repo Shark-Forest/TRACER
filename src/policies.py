@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import importlib
 import os
+from pathlib import Path
 from typing import Any, Protocol
 
 from .customization import load_callable
@@ -12,6 +13,33 @@ from .data_loader import normalize_dataset_name
 
 
 _GSPO_LOG_RATIO_CLAMP = 2.0
+
+
+def _modelscope_model_cache_dir() -> str | None:
+    return (
+        os.environ.get("TRACER_MODELSCOPE_MODEL_CACHE_DIR")
+        or os.environ.get("TRACER_MODELSCOPE_CACHE_DIR")
+        or os.environ.get("MODELSCOPE_CACHE")
+    )
+
+
+def _download_modelscope_snapshot(model_id: str, cache_dir: str | None = None) -> str:
+    from modelscope import snapshot_download  # type: ignore
+
+    return str(snapshot_download(model_id=model_id, cache_dir=cache_dir))
+
+
+def resolve_model_source(model_name: str) -> str:
+    local_path = Path(model_name).expanduser()
+    if local_path.exists():
+        return str(local_path)
+    try:
+        return _download_modelscope_snapshot(
+            model_name,
+            cache_dir=_modelscope_model_cache_dir(),
+        )
+    except Exception:
+        return model_name
 
 
 def _env_value(primary: str, fallback: str, default: str) -> str:
@@ -157,15 +185,25 @@ class TransformersPolicy:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_name, trust_remote_code=True)
-        if self._tokenizer.pad_token_id is None and self._tokenizer.eos_token_id is not None:
-            self._tokenizer.pad_token = self._tokenizer.eos_token
-        self._model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype="auto",
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        def load_from_source(model_source: str):
+            tokenizer = AutoTokenizer.from_pretrained(model_source, trust_remote_code=True)
+            if tokenizer.pad_token_id is None and tokenizer.eos_token_id is not None:
+                tokenizer.pad_token = tokenizer.eos_token
+            model = AutoModelForCausalLM.from_pretrained(
+                model_source,
+                torch_dtype="auto",
+                device_map="auto",
+                trust_remote_code=True,
+            )
+            return tokenizer, model
+
+        model_source = resolve_model_source(self.model_name)
+        try:
+            self._tokenizer, self._model = load_from_source(model_source)
+        except Exception:
+            if model_source == self.model_name:
+                raise
+            self._tokenizer, self._model = load_from_source(self.model_name)
         self._base_model_type = str(getattr(getattr(self._model, "config", None), "model_type", "") or "").lower()
         self._model.eval()
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable
+import inspect
 
 from .config import ExperimentConfig
 from .controllers import (
@@ -252,6 +253,17 @@ def apply_review(state: DialogueState, review_text: str) -> None:
         state.pending_vote_score -= 1
 
 
+def _updater_accepts_dataset_name(updater: PolicyUpdater) -> bool:
+    try:
+        signature = inspect.signature(updater.update)
+    except (TypeError, ValueError):
+        return True
+    return (
+        "dataset_name" in signature.parameters
+        or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+    )
+
+
 def update_policy_from_candidates(
     runtime: Runtime,
     policy: TextPolicy,
@@ -262,7 +274,11 @@ def update_policy_from_candidates(
 ) -> None:
     candidates = policy.sample_candidates(context, runtime.config.generation.num_candidates, dataset_name=dataset_name)
     rewards = [float(reward_fn(candidate)) for candidate in candidates]
-    runtime.updater_for_agent(agent_index).update(policy, context, candidates, rewards)
+    updater = runtime.updater_for_agent(agent_index)
+    if _updater_accepts_dataset_name(updater):
+        updater.update(policy, context, candidates, rewards, dataset_name=dataset_name)
+    else:
+        updater.update(policy, context, candidates, rewards)
 
 
 def execute_proposal_round(

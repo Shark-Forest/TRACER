@@ -131,7 +131,7 @@ Important options:
 | `train_dataset` | `gsm8k` | Training dataset name, HF/ModelScope spec, or JSONL path. |
 | `test_dataset` | `gsm8k` | Test dataset name, HF/ModelScope spec, or JSONL path. |
 | `agent_model` | `qwen2.5-7b` | Model key or Hugging Face model path. |
-| `policy_backend` | `mock` | `mock` for smoke tests, `transformers` for real generation. |
+| `policy_backend` | `transformers` | `transformers` for real generation, `mock` for smoke tests. |
 | `rl_algorithm` | `gspo` | Inner-agent updater label. Built-ins: `gspo`, `none`; any custom label is allowed with `custom_updater`. |
 | `custom_updater` | `null` | Import path for a custom inner policy updater. |
 | `agent_rl_algorithms` | `{}` | Optional per-agent updater labels keyed by agent index. |
@@ -175,22 +175,94 @@ python run_experiment.py \
   --policy-backend transformers
 ```
 
-If the `datasets` package or remote dataset access is unavailable, named
-datasets fall back to tiny built-in sample sets so smoke tests still run.
+Built-in datasets are ModelScope-first. The loading order is:
 
-External Hugging Face and ModelScope datasets can be selected directly:
+1. `MsDataset.load(...)` from ModelScope.
+2. Local ModelScope arrow cache, if ModelScope is unavailable.
+3. Hugging Face fallback for compatibility.
+4. Tiny built-in samples for smoke tests only.
+
+Built-in ModelScope defaults:
+
+- `gsm8k`: `modelscope/gsm8k`, subset `main`, train/test splits.
+- `math500`: `AI-ModelScope/MATH-500`, test split; fallback `modelscope/R1-Distill-Math-Test`.
+- `gpqa-diamond`: `AI-ModelScope/GPQA`, subset `gpqa_diamond`; fallback `modelscope/R1-Distill-Math-Test`.
+
+You can point TRACER at explicit local arrow caches:
+
+```bash
+export TRACER_GSM8K_TRAIN_ARROW=/path/to/gsm8k-train.arrow
+export TRACER_GSM8K_TEST_ARROW=/path/to/gsm8k-test.arrow
+export TRACER_GSM8K_CACHE_DIR=/path/to/modelscope___gsm8k
+
+export TRACER_MATH500_TEST_ARROW=/path/to/math-500-test.arrow
+export TRACER_MATH500_ARROW=/path/to/math-500-test.arrow
+export TRACER_MATH500_CACHE_DIR=/path/to/AI-ModelScope___math-500
+
+export TRACER_GPQA_DIAMOND_TRAIN_ARROW=/path/to/gpqa-train.arrow
+export TRACER_GPQA_DIAMOND_ARROW=/path/to/gpqa-train.arrow
+export TRACER_GPQA_DIAMOND_CACHE_DIR=/path/to/AI-ModelScope___gpqa
+```
+
+For live ModelScope downloads, `TRACER_MODELSCOPE_CACHE_DIR` controls the cache
+root. Dataset-specific overrides are also supported:
+
+```bash
+export TRACER_MATH500_DATASET=AI-ModelScope/MATH-500
+export TRACER_MATH500_SPLIT=test
+export TRACER_GPQA_DATASET=AI-ModelScope/GPQA
+export TRACER_GPQA_SUBSET=gpqa_diamond
+export TRACER_GPQA_SPLIT=train
+```
+
+If remote dataset packages or network access are unavailable, named datasets
+fall back to tiny built-in sample sets so smoke tests still run.
+
+### New ModelScope Datasets
+
+New external datasets default to ModelScope. Use the ModelScope dataset id,
+with or without an owner namespace, and append `::subset-name` only when the
+dataset has a subset/config:
+
+```bash
+python run_experiment.py \
+  --train-dataset owner/custom-dataset::subset-name \
+  --test-dataset owner/custom-eval-dataset::subset-name \
+  --policy-backend transformers
+```
+
+The explicit `modelscope:` or `ms:` prefix is optional for ModelScope datasets:
+
+```bash
+python run_experiment.py \
+  --train-dataset modelscope:owner/custom-dataset::subset-name \
+  --test-dataset ms:owner/custom-eval-dataset::subset-name
+```
+
+Use Hugging Face only when explicitly requested with `hf:` or `huggingface:`:
 
 ```bash
 python run_experiment.py \
   --train-dataset hf:org/custom-dataset::config-name \
-  --test-dataset modelscope:owner/custom-dataset::subset-name
+  --test-dataset huggingface:org/custom-eval-dataset::config-name
 ```
 
-The `::config-name` or `::subset-name` suffix is optional. Without an explicit
-prefix, strings shaped like `org/dataset` are treated as Hugging Face datasets.
-Generic external rows are mapped with common fields: `question`, `problem`,
-`prompt`, `input`, or `query` for the question, and `answer`, `ground_truth`,
-`target`, `label`, or `output` for the gold answer.
+The `::config-name` or `::subset-name` suffix is optional. Generic external
+rows are mapped with common fields: `question`, `problem`, `prompt`, `input`,
+or `query` for the question, and `answer`, `ground_truth`, `target`, `label`,
+or `output` for the gold answer. Rows that wrap the original item under
+`prompt.raw_input` are also supported.
+
+For a new dataset whose answer format differs from GSM8K/MATH-500/GPQA-Diamond,
+provide both hooks so prompting and scoring agree:
+
+```bash
+python run_experiment.py \
+  --train-dataset owner/new-dataset::subset-name \
+  --test-dataset owner/new-eval::subset-name \
+  --custom-prompt-function my_hooks:prompt \
+  --custom-answer-extractor my_hooks:extract
+```
 
 You can also pass a JSONL file path as `train_dataset` or `test_dataset`. Each
 line should contain `question` or `prompt`, plus `answer` or `ground_truth`.
@@ -219,8 +291,8 @@ Run with:
 ```bash
 python run_experiment.py \
   --num-agents 4 \
-  --train-dataset hf:org/custom-dataset \
-  --test-dataset hf:org/custom-dataset \
+  --train-dataset owner/custom-dataset \
+  --test-dataset owner/custom-dataset \
   --custom-prompt-function my_package.hooks:my_prompt \
   --custom-answer-extractor my_package.hooks:my_extract
 ```
@@ -241,9 +313,16 @@ class MyUpdater:
         ...
 ```
 
-The default inner-agent updater is `gspo`. To use a different algorithm for
-all agents, set any descriptive `rl_algorithm` label and provide
-`custom_updater`:
+The default inner-agent updater is `gspo`. For `transformers` policies this is
+a real GSPO update aligned with `MAS/final/src/gspo_verl.py`: group-relative
+advantages, sequence-level importance ratios, clipped surrogate loss, gradient
+clipping, and an optimizer step. LoRA is the default finetuning mode; configure
+it with `TRACER_GSPO_*` environment variables, or the matching `MAS_GSPO_*`
+variables used by `MAS/final`. The `mock` backend records an explicit skipped
+update and is only for smoke tests.
+
+To use a different algorithm for all agents, set any descriptive
+`rl_algorithm` label and provide `custom_updater`:
 
 ```bash
 python run_experiment.py \
@@ -264,11 +343,14 @@ agent_updaters:
   "3": my_package.my_updater:DPOUpdater
 ```
 
-If an agent declares its own `agent_rl_algorithms` entry, that algorithm is used directly; it only uses an import path when `agent_updaters` provides one. Agents without an entry inherit the global `rl_algorithm` and `custom_updater`.
+If an agent declares its own `agent_rl_algorithms` entry, that algorithm is used
+directly; it only uses an import path when `agent_updaters` provides one.
+Agents without an entry inherit the global `rl_algorithm` and `custom_updater`.
 
 The trainer calls the selected updater after candidate generation and reward
-calculation. This is where PPO, DPO-style updates, or a custom rule can be
-implemented without changing the controller code.
+calculation. The built-in regret matcher for the middle controller is already
+implemented in `src/cfr_core.py`; custom middle values still come from
+`custom_value_function`.
 
 ## Custom Middle-Action Values
 
@@ -335,11 +417,11 @@ Each run writes to `output_dir`:
 
 ## Notes on Real Model Runs
 
-The default public configuration uses `policy_backend: mock` so the repository
-is easy to test. To run Qwen2.5-7B, set:
+The default configuration uses `policy_backend: transformers` and the default
+`gspo` updater. For a model-free smoke run, pass `--policy-backend mock`.
 
 ```bash
-python run_experiment.py --policy-backend transformers --agent-model Qwen/Qwen2.5-7B-Instruct
+python run_experiment.py --policy-backend mock --train-limit 2 --eval-limit 2
 ```
 
 Real model-backed training needs sufficient GPU memory and the optional

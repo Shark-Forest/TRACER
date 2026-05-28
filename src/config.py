@@ -38,7 +38,7 @@ class ExperimentConfig:
     train_limit: int | None = None
     eval_limit: int | None = None
     agent_model: str = "qwen2.5-7b"
-    policy_backend: str = "mock"
+    policy_backend: str = "transformers"
     rl_algorithm: str = "gspo"
     custom_updater: str | None = None
     agent_rl_algorithms: dict[str, str] = field(default_factory=dict)

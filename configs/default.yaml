@@ -8,7 +8,7 @@ train_limit: null
 eval_limit: null
 
 agent_model: qwen2.5-7b
-policy_backend: mock
+policy_backend: transformers
 rl_algorithm: gspo
 custom_updater: null
 agent_rl_algorithms: {}

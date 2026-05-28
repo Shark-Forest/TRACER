@@ -89,12 +89,6 @@ Turn-level Regret Matching with Inner Reinforcement Credit for Cooperative Multi
     runtime.py         # Proposal-review state machine
     trainer.py         # Train/evaluate loops and output writing
     metrics.py         # Accuracy summaries
-  tests/
-    test_config.py
-    test_controller_values.py
-    test_customization.py
-    test_regret_matching.py
-    test_runtime_smoke.py
 ```
 
 ## Quick Start
@@ -111,11 +105,6 @@ Run the model-free smoke experiment:
 python run_experiment.py --policy-backend mock --train-limit 2 --eval-limit 2
 ```
 
-Run tests:
-
-```bash
-pytest tests -q
-```
 
 ## Configuration
 
